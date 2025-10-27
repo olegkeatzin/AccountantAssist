@@ -8,3 +8,11 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Excel files
+*.xlsx
+*.xls
+
+# IDE
+.vscode/
+.idea/
