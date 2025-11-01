@@ -15,17 +15,24 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-def search_duckduckgo(query: str, num_results: int = 3) -> list[str]:
+def search_duckduckgo(query: str, num_results: int = 10) -> list[str]:
     """Поиск через DuckDuckGo API (библиотека duckduckgo-search)"""
     try:
         logger.debug(f"DuckDuckGo API запрос: {query}")
         
         with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=num_results * 2))
+            # Увеличиваем количество результатов и добавляем регион для русскоязычных сайтов
+            results = list(ddgs.text(query, region='ru-ru', max_results=num_results * 3))
             links = [r['href'] for r in results if 'href' in r]
             
-            logger.debug(f"DuckDuckGo API: найдено {len(links)} ссылок")
-            return links[:num_results]
+            # Фильтруем Wikipedia и Wiktionary
+            filtered_links = [
+                link for link in links 
+                if not any(wiki in link.lower() for wiki in ['wikipedia.org', 'wiktionary.org', 'wiki'])
+            ]
+            
+            logger.debug(f"DuckDuckGo API: найдено {len(links)} ссылок, после фильтрации: {len(filtered_links)}")
+            return filtered_links[:num_results]
                     
     except Exception as e:
         logger.warning(f"DuckDuckGo API ошибка: {e}")
@@ -55,7 +62,7 @@ def fetch_page_content(url: str, headers: dict) -> str:
             
             if len(text) > 100:
                 logger.debug(f"✓ Извлечено {len(text)} символов")
-                return text[:3000]  # Увеличил лимит до 3000 символов
+                return text[:5000]  # Увеличиваем лимит до 5000 символов для большей информативности
             else:
                 logger.debug(f"✗ Мало текста ({len(text)} символов)")
                 logger.debug(f"   Первые 200 символов: {text[:200]}")
@@ -70,13 +77,13 @@ def fetch_page_content(url: str, headers: dict) -> str:
     return ""
 
 
-def search_internet(query: str, num_results: int = 3, search_engines: List[str] = None) -> list[str]:
+def search_internet(query: str, num_results: int = 10, search_engines: List[str] = None) -> list[str]:
     """
     Поиск информации в интернете по запросу с использованием DuckDuckGo
     
     Args:
         query: Поисковый запрос
-        num_results: Количество результатов для обработки
+        num_results: Количество результатов для обработки (по умолчанию: 10)
         search_engines: Список поисковиков (игнорируется, используется только DuckDuckGo)
         
     Returns:
@@ -142,7 +149,8 @@ def summarize_with_ollama(
     product_name: str, 
     search_results: list[str], 
     model: str = "llama3.2",
-    host: Optional[str] = None
+    host: Optional[str] = None,
+    comment: str = None
 ) -> str:
     """
     Суммаризация информации о товаре с помощью Ollama
@@ -152,6 +160,7 @@ def summarize_with_ollama(
         search_results: Результаты поиска
         model: Модель Ollama для использования
         host: Хост Ollama (например, 'http://localhost:11434')
+        comment: Дополнительный комментарий о товаре (опционально)
         
     Returns:
         Краткое описание товара
@@ -159,21 +168,27 @@ def summarize_with_ollama(
     # Создаем клиент с указанным хостом, если он задан
     client = ollama.Client(host=host) if host else ollama.Client()
     
+    # Добавляем комментарий к контексту, если он есть
+    comment_context = ""
+    if comment and str(comment).strip():
+        comment_context = f"\n\nДополнительная информация о товаре:\n{comment}"
+    
     # Если есть результаты поиска - используем их
     if search_results:
-        # Объединяем результаты поиска
-        context = "\n\n".join(search_results[:3])  # Берем первые 3 результата
+        # Объединяем результаты поиска (берем больше результатов для лучшего качества)
+        context = "\n\n".join(search_results[:5])  # Увеличиваем до 5 результатов
         
         prompt = f"""На основе следующей информации из интернета, создай краткое описание товара "{product_name}".
 
 Информация из интернета:
-{context}
+{context}{comment_context}
 
 Краткое описание товара:"""
     else:
         # Если информации нет - попробуем создать описание на основе названия
         prompt = f"""На основе названия товара "{product_name}", создай краткое описание.
-Если ты не знаешь что это за товар, попробуй разобрать название по частям и объяснить.
+Если ты не знаешь что это за товар, попробуй разобрать название по частям и объяснить.{comment_context}
+
 Краткое описание товара:"""
     
     try:
@@ -233,11 +248,25 @@ def process_excel(
     if description_column not in df.columns:
         df[description_column] = ""
     
+    # Фильтруем строки с "Вид производства" = "Производство"
+    production_filter_column = "Вид производства"
+    if production_filter_column in df.columns:
+        production_mask = df[production_filter_column] == "Производство"
+        production_count = production_mask.sum()
+        if production_count > 0:
+            df.loc[production_mask, description_column] = "ПРОИЗВОДСТВО"
+            logger.info(f"Отфильтровано {production_count} строк с 'Вид производства' = 'Производство'")
+    
     logger.info(f"Найдено {len(df)} строк для обработки")
     
     # Обрабатываем каждую строку
     for idx, row in df.iterrows():
         product_name = row[column_name]
+        
+        # Пропускаем строки с "Вид производства" = "Производство"
+        if production_filter_column in df.columns and row[production_filter_column] == "Производство":
+            logger.info(f"[{idx+1}/{len(df)}] Пропуск (Вид производства = Производство): {product_name}")
+            continue
         
         # Пропускаем, если уже есть описание и включен режим пропуска
         if skip_existing and pd.notna(row[description_column]) and row[description_column].strip():
@@ -249,6 +278,14 @@ def process_excel(
             continue
         
         logger.info(f"[{idx+1}/{len(df)}] Обработка: {product_name}")
+        
+        # Получаем комментарий, если он есть
+        comment = None
+        comment_column = "Комментарий"
+        if comment_column in df.columns and pd.notna(row[comment_column]):
+            comment = str(row[comment_column]).strip()
+            if comment:
+                logger.info(f"  - 📝 Найден комментарий: {comment[:100]}...")
         
         try:
             # Поиск информации
@@ -272,7 +309,8 @@ def process_excel(
                 str(product_name), 
                 search_results,
                 model=ollama_model,
-                host=ollama_host
+                host=ollama_host,
+                comment=comment
             )
             
             df.at[idx, description_column] = description
