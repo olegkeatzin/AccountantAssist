@@ -9,6 +9,8 @@ from typing import Optional, List
 import logging
 import json
 from ddgs import DDGS
+import os
+import shutil
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -269,6 +271,33 @@ def summarize_with_ollama(
         return f"Ошибка суммаризации: {str(e)}"
 
 
+def rotate_backup_files(output_file: str):
+    """
+    Ротация файлов: текущий → предыдущий, старый предыдущий → удаляется
+    
+    Args:
+        output_file: Путь к выходному файлу
+    """
+    previous_file = output_file.replace('.xlsx', '_previous.xlsx')
+    
+    # Если существует текущий файл, делаем его предыдущим
+    if os.path.exists(output_file):
+        # Удаляем старый предыдущий файл, если он есть
+        if os.path.exists(previous_file):
+            try:
+                os.remove(previous_file)
+                logger.debug(f"Удален старый бэкап: {previous_file}")
+            except Exception as e:
+                logger.warning(f"Не удалось удалить старый бэкап: {e}")
+        
+        # Переименовываем текущий в предыдущий
+        try:
+            shutil.copy2(output_file, previous_file)
+            logger.debug(f"Создан бэкап: {previous_file}")
+        except Exception as e:
+            logger.warning(f"Не удалось создать бэкап: {e}")
+
+
 def process_excel(
     input_file: str,
     output_file: str,
@@ -384,8 +413,17 @@ def process_excel(
             source_mark = "🌐" if search_results else "🤖"
             logger.info(f"  - {source_mark} Готово: {description[:100]}...")
             
-            # Сохраняем промежуточный результат после каждой обработанной строки
-            df.to_excel(output_file, index=False)
+            # Сохраняем промежуточный результат с ротацией бэкапов
+            try:
+                # Создаем бэкап перед сохранением
+                rotate_backup_files(output_file)
+                
+                # Сохраняем текущее состояние
+                df.to_excel(output_file, index=False)
+                logger.debug(f"  - 💾 Прогресс сохранен")
+            except Exception as e:
+                logger.error(f"  - ⚠️ Ошибка сохранения: {e}")
+                logger.error(f"     Данные НЕ потеряны, но файл может быть поврежден")
             
             # Небольшая пауза между запросами
             time.sleep(2)
@@ -393,11 +431,30 @@ def process_excel(
         except Exception as e:
             logger.error(f"  - Ошибка при обработке: {e}")
             df.at[idx, description_column] = f"Ошибка: {str(e)}"
+            
+            # Даже при ошибке обработки пытаемся сохранить
+            try:
+                rotate_backup_files(output_file)
+                df.to_excel(output_file, index=False)
+            except Exception as save_error:
+                logger.error(f"  - ⚠️ Критическая ошибка сохранения: {save_error}")
+            
             continue
     
     # Финальное сохранение
-    df.to_excel(output_file, index=False)
-    logger.info(f"Результат сохранен в: {output_file}")
+    try:
+        rotate_backup_files(output_file)
+        df.to_excel(output_file, index=False)
+        logger.info(f"✅ Результат сохранен в: {output_file}")
+        
+        previous_file = output_file.replace('.xlsx', '_previous.xlsx')
+        if os.path.exists(previous_file):
+            logger.info(f"💾 Бэкап доступен в: {previous_file}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка финального сохранения: {e}")
+        previous_file = output_file.replace('.xlsx', '_previous.xlsx')
+        if os.path.exists(previous_file):
+            logger.warning(f"⚠️ Используйте бэкап: {previous_file}")
 
 
 def main():
