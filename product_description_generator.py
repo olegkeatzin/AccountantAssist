@@ -318,6 +318,16 @@ def process_excel(
     for idx, row in df.iterrows():
         product_name = row[column_name]
         
+        # Проверяем на специальные фразы в полном наименовании
+        if pd.notna(product_name):
+            product_name_lower = str(product_name).lower()
+            skip_phrases = ["использовать", "не заполнять, висят док-ты по отгрузке"]
+            
+            if any(phrase in product_name_lower for phrase in skip_phrases):
+                df.at[idx, description_column] = "НЕТ ДАННЫХ"
+                logger.info(f"[{idx+1}/{len(df)}] Найдена служебная фраза, установлено: НЕТ ДАННЫХ")
+                continue
+        
         # Пропускаем строки с "Вид производства" = "Производство"
         if production_filter_column in df.columns and row[production_filter_column] == "Производство":
             logger.info(f"[{idx+1}/{len(df)}] Пропуск (Вид производства = Производство): {product_name}")
