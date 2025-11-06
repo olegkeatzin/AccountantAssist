@@ -321,6 +321,35 @@ def process_excel(
     """
     logger.info(f"Загрузка файла: {input_file}")
     
+    # Проверяем наличие предыдущей версии файла для возобновления работы
+    previous_file = output_file.replace('.xlsx', '_previous.xlsx')
+    start_from_index = 0
+    
+    if os.path.exists(previous_file):
+        logger.info(f"🔄 Обнаружен файл предыдущего запуска: {previous_file}")
+        try:
+            # Загружаем предыдущую версию
+            df_previous = pd.read_excel(previous_file)
+            
+            # Определяем последнюю обработанную строку
+            if description_column in df_previous.columns:
+                # Ищем последнюю строку с заполненным описанием
+                for idx in range(len(df_previous) - 1, -1, -1):
+                    if pd.notna(df_previous.at[idx, description_column]) and df_previous.at[idx, description_column].strip():
+                        start_from_index = idx + 1
+                        break
+                
+                if start_from_index > 0:
+                    logger.info(f"✅ Найдена последняя обработанная строка: {start_from_index}")
+                    logger.info(f"🚀 Возобновление работы со строки {start_from_index + 1}")
+                else:
+                    logger.info("ℹ️ В предыдущем файле нет обработанных строк, начинаем с начала")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось загрузить предыдущий файл: {e}")
+            logger.info("Начинаем обработку с начала")
+    else:
+        logger.info("ℹ️ Файл предыдущего запуска не найден, начинаем с начала")
+    
     # Читаем Excel файл
     df = pd.read_excel(input_file)
     
@@ -331,6 +360,19 @@ def process_excel(
     # Добавляем колонку для описаний, если её нет
     if description_column not in df.columns:
         df[description_column] = ""
+    
+    # Если есть предыдущая версия, копируем уже обработанные данные
+    if start_from_index > 0 and os.path.exists(previous_file):
+        try:
+            df_previous = pd.read_excel(previous_file)
+            if description_column in df_previous.columns:
+                # Копируем обработанные описания из предыдущей версии
+                for idx in range(min(start_from_index, len(df_previous), len(df))):
+                    if pd.notna(df_previous.at[idx, description_column]):
+                        df.at[idx, description_column] = df_previous.at[idx, description_column]
+                logger.info(f"📋 Скопировано {start_from_index} обработанных описаний из предыдущего файла")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось скопировать данные из предыдущего файла: {e}")
     
     # Фильтруем строки с "Вид производства" = "Производство"
     production_filter_column = "Вид производства"
@@ -343,8 +385,40 @@ def process_excel(
     
     logger.info(f"Найдено {len(df)} строк для обработки")
     
-    # Обрабатываем каждую строку
+    # Подсчитываем количество строк для обработки
+    total_to_process = 0
+    for idx in range(start_from_index, len(df)):
+        row = df.iloc[idx]
+        product_name = row[column_name]
+        
+        # Пропускаем специальные случаи (производство, служебные фразы, пустые)
+        if production_filter_column in df.columns and row[production_filter_column] == "Производство":
+            continue
+        if pd.notna(product_name):
+            product_name_lower = str(product_name).lower()
+            skip_phrases = ["использовать", "не заполнять, висят док-ты по отгрузке"]
+            if any(phrase in product_name_lower for phrase in skip_phrases):
+                continue
+        if pd.isna(product_name) or not str(product_name).strip():
+            continue
+        if skip_existing and pd.notna(row[description_column]) and row[description_column].strip():
+            continue
+        
+        total_to_process += 1
+    
+    if start_from_index > 0:
+        logger.info(f"📊 Пропущено уже обработанных строк: {start_from_index}")
+        logger.info(f"📊 Осталось обработать: {total_to_process} строк")
+    else:
+        logger.info(f"📊 Всего строк для обработки: {total_to_process}")
+    
+    # Обрабатываем каждую строку, начиная с нужного индекса
+    processed_count = 0
     for idx, row in df.iterrows():
+        # Пропускаем строки до start_from_index
+        if idx < start_from_index:
+            continue
+        
         product_name = row[column_name]
         
         # Проверяем на специальные фразы в полном наименовании
@@ -372,6 +446,8 @@ def process_excel(
             continue
         
         logger.info(f"[{idx+1}/{len(df)}] Обработка: {product_name}")
+        processed_count += 1
+        logger.info(f"  - 📈 Прогресс: {processed_count}/{total_to_process} строк")
         
         # Получаем комментарий, если он есть
         comment = None
