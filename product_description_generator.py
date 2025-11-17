@@ -149,6 +149,86 @@ def search_internet(query: str, num_results: int = 10, search_engines: List[str]
     return results, used_links
 
 
+def generate_description_with_confidence(
+    product_name: str,
+    model: str = "llama3.2",
+    host: Optional[str] = None,
+    comment: str = None
+) -> tuple[str, float]:
+    """
+    Генерация описания товара с оценкой уверенности модели
+    
+    Args:
+        product_name: Название товара
+        model: Модель Ollama для использования
+        host: Хост Ollama
+        comment: Дополнительный комментарий о товаре
+        
+    Returns:
+        Кортеж (описание, уверенность в диапазоне 0-1)
+    """
+    client = ollama.Client(host=host) if host else ollama.Client()
+    
+    comment_context = ""
+    if comment and str(comment).strip():
+        comment_context = f"\n\nДополнительная информация: {comment}"
+    
+    # Промпт с запросом на оценку уверенности
+    prompt = f"""Объект: {product_name}{comment_context}
+
+Задание: 
+1. Создай краткое описание (2-4 предложения): что это, где применяется, для чего используется
+2. Оцени свою уверенность в описании от 0.0 до 1.0, где:
+   - 0.9-1.0: высокая уверенность, знаю этот товар/услугу хорошо
+   - 0.7-0.9: средняя уверенность, общее представление есть
+   - 0.0-0.7: низкая уверенность, нужна дополнительная информация
+
+Формат ответа:
+ОПИСАНИЕ: [твое описание]
+УВЕРЕННОСТЬ: [число от 0.0 до 1.0]"""
+    
+    system_prompt = """Ты - эксперт по техническим товарам, строительным материалам, промышленному оборудованию и услугам.
+Всегда давай конкретное описание на основе своих знаний и честно оценивай свою уверенность."""
+    
+    try:
+        response = client.generate(
+            model=model,
+            prompt=prompt,
+            system=system_prompt,
+            options={
+                'temperature': 0.3,
+                'num_predict': 300
+            }
+        )
+        
+        result = response['response'].strip()
+        
+        # Парсим ответ
+        description = ""
+        confidence = 0.0
+        
+        for line in result.split('\n'):
+            if line.startswith('ОПИСАНИЕ:'):
+                description = line.replace('ОПИСАНИЕ:', '').strip()
+            elif line.startswith('УВЕРЕННОСТЬ:'):
+                try:
+                    conf_str = line.replace('УВЕРЕННОСТЬ:', '').strip()
+                    confidence = float(conf_str)
+                except:
+                    confidence = 0.5  # По умолчанию средняя уверенность
+        
+        # Если формат не распознан, пытаемся извлечь описание
+        if not description:
+            description = result.split('\n')[0]  # Берем первую строку
+            confidence = 0.5
+        
+        return description, confidence
+        
+    except Exception as e:
+        logger.error(f"Ошибка при генерации с оценкой уверенности: {e}")
+        return "", 0.0
+
+
 def summarize_with_ollama(
     product_name: str, 
     search_results: list[str], 
@@ -308,7 +388,8 @@ def process_excel(
     sources_column: str = "Источники",
     ollama_host: Optional[str] = None,
     ollama_model: str = "llama3.2",
-    skip_existing: bool = True
+    skip_existing: bool = True,
+    confidence_threshold: float = 0.7
 ):
     """
     Обработка Excel файла с добавлением описаний
@@ -322,6 +403,7 @@ def process_excel(
         ollama_host: Хост Ollama
         ollama_model: Модель Ollama
         skip_existing: Пропускать уже обработанные строки
+        confidence_threshold: Порог уверенности модели (0.0-1.0) для обращения к интернету
     """
     logger.info(f"Загрузка файла: {input_file}")
     
@@ -473,41 +555,63 @@ def process_excel(
                 logger.info(f"  - 📝 Найден комментарий: {comment[:100]}...")
         
         try:
-            # Поиск информации
-            logger.info("  - Поиск информации в интернете...")
-            search_results, source_links = search_internet(str(product_name))
-            
-            if search_results:
-                logger.info(f"  - ✅ Найдено {len(search_results)} релевантных страниц с информацией")
-            else:
-                logger.warning("  - ⚠️ Информация в интернете НЕ НАЙДЕНА")
-                logger.warning("      Причины могут быть:")
-                logger.warning("      • Товар слишком специфический/редкий")
-                logger.warning("      • Поисковик не нашел подходящих страниц")
-                logger.warning("      • Найденные страницы недоступны или пусты")
-                logger.warning("      • Проблемы с интернет-соединением")
-                logger.warning("      📝 Будет создано описание на основе НАЗВАНИЯ товара (LLM)")
-            
-            # Суммаризация с помощью Ollama (работает даже без результатов поиска)
-            logger.info("  - Суммаризация с помощью Ollama...")
-            description = summarize_with_ollama(
-                str(product_name), 
-                search_results,
+            # Шаг 1: Пытаемся создать описание без интернета
+            logger.info("  - 🤖 Попытка создать описание на основе знаний модели...")
+            initial_description, confidence = generate_description_with_confidence(
+                str(product_name),
                 model=ollama_model,
                 host=ollama_host,
                 comment=comment
             )
             
+            logger.info(f"  - 📊 Уверенность модели: {confidence:.2f}")
+            
+            # Порог уверенности для обращения к интернету
+            
+            if confidence >= confidence_threshold:
+                # Модель уверена - используем её ответ
+                logger.info(f"  - ✅ Модель уверена (≥{confidence_threshold}), используем её описание")
+                description = initial_description
+                source_links = []
+                search_results = []
+            else:
+                # Модель не уверена - ищем в интернете
+                logger.info(f"  - 🔍 Модель не уверена (<{confidence_threshold}), обращаемся к интернету...")
+                search_results, source_links = search_internet(str(product_name))
+                
+                if search_results:
+                    logger.info(f"  - ✅ Найдено {len(search_results)} релевантных страниц с информацией")
+                    # Суммаризация с использованием интернет-данных
+                    logger.info("  - Создание описания на основе интернет-данных...")
+                    description = summarize_with_ollama(
+                        str(product_name), 
+                        search_results,
+                        model=ollama_model,
+                        host=ollama_host,
+                        comment=comment
+                    )
+                else:
+                    logger.warning("  - ⚠️ Информация в интернете НЕ НАЙДЕНА")
+                    logger.warning("      Используем первоначальное описание модели")
+                    description = initial_description
+            
             df.at[idx, description_column] = description
             
-            # Сохраняем ссылки на источники (через запятую с пробелом)
+            # Сохраняем ссылки на источники
             if source_links:
                 df.at[idx, sources_column] = ", ".join(source_links)
+            elif confidence >= confidence_threshold:
+                df.at[idx, sources_column] = f"Создано LLM (уверенность: {confidence:.2f})"
             else:
-                df.at[idx, sources_column] = "Нет источников (создано LLM)"
+                df.at[idx, sources_column] = f"Создано LLM без интернета (уверенность: {confidence:.2f})"
             
             # Показываем результат с пометкой об источнике информации
-            source_mark = "🌐" if search_results else "🤖"
+            if search_results:
+                source_mark = "🌐"
+            elif confidence >= confidence_threshold:
+                source_mark = "🤖✓"
+            else:
+                source_mark = "🤖"
             logger.info(f"  - {source_mark} Готово: {description[:100]}...")
             
             # Сохраняем промежуточный результат с ротацией бэкапов
@@ -611,6 +715,12 @@ def main():
         action='store_true',
         help='Подробное логирование (показывать детали поиска)'
     )
+    parser.add_argument(
+        '--confidence-threshold',
+        type=float,
+        default=0.7,
+        help='Порог уверенности модели (0.0-1.0) для обращения к интернету (по умолчанию: 0.7)'
+    )
     
     args = parser.parse_args()
     
@@ -630,7 +740,8 @@ def main():
             sources_column=args.sources_column,
             ollama_host=args.ollama_host,
             ollama_model=args.ollama_model,
-            skip_existing=not args.no_skip_existing
+            skip_existing=not args.no_skip_existing,
+            confidence_threshold=args.confidence_threshold
         )
         logger.info("Обработка завершена успешно!")
     except Exception as e:
