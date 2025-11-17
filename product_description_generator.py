@@ -79,7 +79,7 @@ def fetch_page_content(url: str, headers: dict) -> str:
     return ""
 
 
-def search_internet(query: str, num_results: int = 10, search_engines: List[str] = None) -> list[str]:
+def search_internet(query: str, num_results: int = 10, search_engines: List[str] = None) -> tuple[list[str], list[str]]:
     """
     Поиск информации в интернете по запросу с использованием DuckDuckGo
     
@@ -89,9 +89,10 @@ def search_internet(query: str, num_results: int = 10, search_engines: List[str]
         search_engines: Список поисковиков (игнорируется, используется только DuckDuckGo)
         
     Returns:
-        Список текстов с найденных страниц (может быть пустым)
+        Кортеж (список текстов с найденных страниц, список ссылок на источники)
     """
     results = []
+    used_links = []
     all_links = []
     
     headers = {
@@ -129,6 +130,7 @@ def search_internet(query: str, num_results: int = 10, search_engines: List[str]
         content = fetch_page_content(link, headers)
         if content:
             results.append(content)
+            used_links.append(link)
             logger.info(f"    ✓ Успешно извлечено {len(content)} символов")
         else:
             logger.warning(f"    ✗ Не удалось извлечь текст")
@@ -144,7 +146,7 @@ def search_internet(query: str, num_results: int = 10, search_engines: List[str]
     else:
         logger.info(f"  - ✅ Успешно извлечено {len(results)} страниц с содержимым")
     
-    return results
+    return results, used_links
 
 
 def summarize_with_ollama(
@@ -303,6 +305,7 @@ def process_excel(
     output_file: str,
     column_name: str = "Полное наименование",
     description_column: str = "Расшифровка",
+    sources_column: str = "Источники",
     ollama_host: Optional[str] = None,
     ollama_model: str = "llama3.2",
     skip_existing: bool = True
@@ -315,6 +318,7 @@ def process_excel(
         output_file: Путь к выходному файлу
         column_name: Название колонки с наименованиями товаров
         description_column: Название новой колонки с описаниями
+        sources_column: Название колонки со ссылками на источники
         ollama_host: Хост Ollama
         ollama_model: Модель Ollama
         skip_existing: Пропускать уже обработанные строки
@@ -361,6 +365,10 @@ def process_excel(
     if description_column not in df.columns:
         df[description_column] = ""
     
+    # Добавляем колонку для источников, если её нет
+    if sources_column not in df.columns:
+        df[sources_column] = ""
+    
     # Если есть предыдущая версия, копируем уже обработанные данные
     if start_from_index > 0 and os.path.exists(previous_file):
         try:
@@ -370,18 +378,15 @@ def process_excel(
                 for idx in range(min(start_from_index, len(df_previous), len(df))):
                     if pd.notna(df_previous.at[idx, description_column]):
                         df.at[idx, description_column] = df_previous.at[idx, description_column]
+                    # Копируем источники, если они есть
+                    if sources_column in df_previous.columns and pd.notna(df_previous.at[idx, sources_column]):
+                        df.at[idx, sources_column] = df_previous.at[idx, sources_column]
                 logger.info(f"📋 Скопировано {start_from_index} обработанных описаний из предыдущего файла")
         except Exception as e:
             logger.warning(f"⚠️ Не удалось скопировать данные из предыдущего файла: {e}")
     
-    # Фильтруем строки с "Вид производства" = "Производство"
-    production_filter_column = "Вид производства"
-    if production_filter_column in df.columns:
-        production_mask = df[production_filter_column] == "Производство"
-        production_count = production_mask.sum()
-        if production_count > 0:
-            df.loc[production_mask, description_column] = "ПРОИЗВОДСТВО"
-            logger.info(f"Отфильтровано {production_count} строк с 'Вид производства' = 'Производство'")
+    # Определяем колонку для фильтрации
+    production_filter_column = "Вид воспроизводства"
     
     logger.info(f"Найдено {len(df)} строк для обработки")
     
@@ -427,13 +432,12 @@ def process_excel(
             skip_phrases = ["использовать", "не заполнять, висят док-ты по отгрузке"]
             
             if any(phrase in product_name_lower for phrase in skip_phrases):
-                df.at[idx, description_column] = "НЕТ ДАННЫХ"
-                logger.info(f"[{idx+1}/{len(df)}] Найдена служебная фраза, установлено: НЕТ ДАННЫХ")
+                logger.info(f"[{idx+1}/{len(df)}] Найдена служебная фраза, пропуск")
                 continue
         
-        # Пропускаем строки с "Вид производства" = "Производство"
+        # Пропускаем строки с "Вид воспроизводства" = "Производство"
         if production_filter_column in df.columns and row[production_filter_column] == "Производство":
-            logger.info(f"[{idx+1}/{len(df)}] Пропуск (Вид производства = Производство): {product_name}")
+            logger.info(f"[{idx+1}/{len(df)}] Пропуск (Вид воспроизводства = Производство): {product_name}")
             continue
         
         # Пропускаем, если уже есть описание и включен режим пропуска
@@ -460,7 +464,7 @@ def process_excel(
         try:
             # Поиск информации
             logger.info("  - Поиск информации в интернете...")
-            search_results = search_internet(str(product_name))
+            search_results, source_links = search_internet(str(product_name))
             
             if search_results:
                 logger.info(f"  - ✅ Найдено {len(search_results)} релевантных страниц с информацией")
@@ -484,6 +488,12 @@ def process_excel(
             )
             
             df.at[idx, description_column] = description
+            
+            # Сохраняем ссылки на источники (через запятую с пробелом)
+            if source_links:
+                df.at[idx, sources_column] = ", ".join(source_links)
+            else:
+                df.at[idx, sources_column] = "Нет источников (создано LLM)"
             
             # Показываем результат с пометкой об источнике информации
             source_mark = "🌐" if search_results else "🤖"
@@ -562,6 +572,12 @@ def main():
         help='Название новой колонки с описаниями (по умолчанию: Расшифровка)'
     )
     parser.add_argument(
+        '--sources-column',
+        type=str,
+        default='Источники',
+        help='Название колонки со ссылками на источники (по умолчанию: Источники)'
+    )
+    parser.add_argument(
         '--ollama-host',
         type=str,
         default=None,
@@ -600,6 +616,7 @@ def main():
             output_file=args.output,
             column_name=args.column,
             description_column=args.description_column,
+            sources_column=args.sources_column,
             ollama_host=args.ollama_host,
             ollama_model=args.ollama_model,
             skip_existing=not args.no_skip_existing
