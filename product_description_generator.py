@@ -387,6 +387,7 @@ def process_excel(
     
     # Определяем колонку для фильтрации
     production_filter_column = "Вид воспроизводства"
+    nomenclature_type_column = "Вид номенклатуры"
     
     logger.info(f"Найдено {len(df)} строк для обработки")
     
@@ -398,6 +399,9 @@ def process_excel(
         
         # Пропускаем специальные случаи (производство, служебные фразы, пустые)
         if production_filter_column in df.columns and row[production_filter_column] == "Производство":
+            continue
+        # Пропускаем если не товар
+        if nomenclature_type_column in df.columns and row[nomenclature_type_column] != "Товар":
             continue
         if pd.notna(product_name):
             product_name_lower = str(product_name).lower()
@@ -439,6 +443,13 @@ def process_excel(
         if production_filter_column in df.columns and row[production_filter_column] == "Производство":
             logger.info(f"[{idx+1}/{len(df)}] Пропуск (Вид воспроизводства = Производство): {product_name}")
             continue
+        
+        # Обрабатываем только товары
+        if nomenclature_type_column in df.columns:
+            if pd.isna(row[nomenclature_type_column]) or row[nomenclature_type_column] != "Товар":
+                nomenclature_type = row[nomenclature_type_column] if pd.notna(row[nomenclature_type_column]) else "пусто"
+                logger.info(f"[{idx+1}/{len(df)}] Пропуск (Вид номенклатуры = {nomenclature_type}): {product_name}")
+                continue
         
         # Пропускаем, если уже есть описание и включен режим пропуска
         if skip_existing and pd.notna(row[description_column]) and row[description_column].strip():
