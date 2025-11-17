@@ -386,6 +386,7 @@ def process_excel(
     column_name: str = "Полное наименование",
     description_column: str = "Расшифровка",
     sources_column: str = "Источники",
+    confidence_column: str = "Уверенность модели",
     ollama_host: Optional[str] = None,
     ollama_model: str = "llama3.2",
     skip_existing: bool = True,
@@ -400,6 +401,7 @@ def process_excel(
         column_name: Название колонки с наименованиями товаров
         description_column: Название новой колонки с описаниями
         sources_column: Название колонки со ссылками на источники
+        confidence_column: Название колонки с уверенностью модели
         ollama_host: Хост Ollama
         ollama_model: Модель Ollama
         skip_existing: Пропускать уже обработанные строки
@@ -451,6 +453,10 @@ def process_excel(
     if sources_column not in df.columns:
         df[sources_column] = ""
     
+    # Добавляем колонку для уверенности, если её нет
+    if confidence_column not in df.columns:
+        df[confidence_column] = ""
+    
     # Если есть предыдущая версия, копируем уже обработанные данные
     if start_from_index > 0 and os.path.exists(previous_file):
         try:
@@ -463,6 +469,9 @@ def process_excel(
                     # Копируем источники, если они есть
                     if sources_column in df_previous.columns and pd.notna(df_previous.at[idx, sources_column]):
                         df.at[idx, sources_column] = df_previous.at[idx, sources_column]
+                    # Копируем уверенность, если она есть
+                    if confidence_column in df_previous.columns and pd.notna(df_previous.at[idx, confidence_column]):
+                        df.at[idx, confidence_column] = df_previous.at[idx, confidence_column]
                 logger.info(f"📋 Скопировано {start_from_index} обработанных описаний из предыдущего файла")
         except Exception as e:
             logger.warning(f"⚠️ Не удалось скопировать данные из предыдущего файла: {e}")
@@ -597,6 +606,9 @@ def process_excel(
             
             df.at[idx, description_column] = description
             
+            # Сохраняем уверенность модели
+            df.at[idx, confidence_column] = f"{confidence:.2f}"
+            
             # Сохраняем ссылки на источники
             if source_links:
                 df.at[idx, sources_column] = ", ".join(source_links)
@@ -693,6 +705,12 @@ def main():
         help='Название колонки со ссылками на источники (по умолчанию: Источники)'
     )
     parser.add_argument(
+        '--confidence-column',
+        type=str,
+        default='Уверенность модели',
+        help='Название колонки с уверенностью модели (по умолчанию: Уверенность модели)'
+    )
+    parser.add_argument(
         '--ollama-host',
         type=str,
         default=None,
@@ -738,6 +756,7 @@ def main():
             column_name=args.column,
             description_column=args.description_column,
             sources_column=args.sources_column,
+            confidence_column=args.confidence_column,
             ollama_host=args.ollama_host,
             ollama_model=args.ollama_model,
             skip_existing=not args.no_skip_existing,
